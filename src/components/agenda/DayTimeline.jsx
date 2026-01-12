@@ -10,7 +10,8 @@ const MINUTE_MARKS = [0, 15, 30, 45];
 const DEFAULT_ROW_H = 68;
 
 const { width: SCREEN_W } = Dimensions.get("window");
-const PAGER_CENTER_INDEX = 1;
+const PAGER_RANGE = 5; // permite saltar hasta 5 días en un swipe
+const PAGER_CENTER_INDEX = PAGER_RANGE;
 
 function formatHourLabel(h) {
   const isPM = h >= 12;
@@ -95,20 +96,24 @@ export default function DayTimeline({ rowHeight = DEFAULT_ROW_H, initialDate }) 
   const cursorRef = useRef(cursorDate);
   cursorRef.current = cursorDate;
 
+  // Páginas fijas (deltas -R..R). Permite avanzar varios días con un swipe rápido.
   const data = useMemo(() => {
-    const cur = cursorDate;
-    const prev = addDays(cur, -1);
-    const next = addDays(cur, 1);
-    return [
-      { key: toISODateLocal(prev), date: prev },
-      { key: toISODateLocal(cur), date: cur },
-      { key: toISODateLocal(next), date: next },
-    ];
-  }, [cursorDate]);
+    const pages = [];
+    for (let delta = -PAGER_RANGE; delta <= PAGER_RANGE; delta += 1) {
+      pages.push({ key: `d${delta}`, delta });
+    }
+    return pages;
+  }, []);
 
   const listRef = useRef(null);
   const isResettingRef = useRef(false);
   const pendingExternalISORef = useRef(null);
+  const externalAnimSeqRef = useRef(0);
+  const externalDebounceTimerRef = useRef(null);
+  const activeExternalTargetRef = useRef(null); // { iso: string, seq: number }
+
+  // Preview: cambia selectedISO en medio del swipe (cuando ya pasó el umbral)
+  const lastPreviewDeltaRef = useRef(0);
 
   const getLayout = useCallback((_, index) => {
     return { length: SCREEN_W, offset: SCREEN_W * index, index };
@@ -116,7 +121,7 @@ export default function DayTimeline({ rowHeight = DEFAULT_ROW_H, initialDate }) 
 
   const recenter = useCallback(() => {
     isResettingRef.current = true;
-    listRef.current?.scrollToIndex({ index: PAGER_CENTER_INDEX, animated: false });
+    listRef.current?.scrollToOffset({ offset: SCREEN_W * PAGER_CENTER_INDEX, animated: false });
     requestAnimationFrame(() => {
       isResettingRef.current = false;
     });
@@ -132,7 +137,7 @@ export default function DayTimeline({ rowHeight = DEFAULT_ROW_H, initialDate }) 
     if (cur && cur.getTime() === fromISO.getTime()) return;
 
     // Si viene del propio timeline, no disparamos animación (evita loops).
-    if (source === "timeline") return;
+    if (source === "timeline" || source === "timeline_preview") return;
 
     // En init u orígenes no-UI: aterriza directo al centro sin animación.
     if (source === "init") {
@@ -145,19 +150,77 @@ export default function DayTimeline({ rowHeight = DEFAULT_ROW_H, initialDate }) 
     const diff = differenceInCalendarDays(fromISO, cur || fromISO);
     if (!diff) return;
 
+    // Coalesce: si el usuario toca días muy rápido, animamos solo hacia el último.
+    externalAnimSeqRef.current += 1;
+    const seq = externalAnimSeqRef.current;
     pendingExternalISORef.current = selectedISO;
-    const dir = diff > 0 ? 1 : -1;
 
-    // Asegura que arrancamos desde el centro y luego animamos a la página destino.
-    recenter();
-    requestAnimationFrame(() => {
-      if (pendingExternalISORef.current !== selectedISO) return;
-      listRef.current?.scrollToIndex({
-        index: dir > 0 ? 2 : 0,
-        animated: true,
+    if (externalDebounceTimerRef.current) {
+      clearTimeout(externalDebounceTimerRef.current);
+      externalDebounceTimerRef.current = null;
+    }
+
+    externalDebounceTimerRef.current = setTimeout(() => {
+      if (seq !== externalAnimSeqRef.current) return;
+      const pendingISO = pendingExternalISORef.current;
+      const target = parseISODateLocal(pendingISO);
+      const base = cursorRef.current;
+      if (!pendingISO || !target || !base) return;
+
+      const d = differenceInCalendarDays(target, base);
+      if (!d) return;
+
+      // Si el salto cabe dentro del rango, animamos hasta esa página.
+      // Si es un salto grande, aterrizamos directo (evita animación rara).
+      if (Math.abs(d) > PAGER_RANGE) {
+        activeExternalTargetRef.current = null;
+        pendingExternalISORef.current = null;
+        setCursorDate(target);
+        requestAnimationFrame(() => recenter());
+        return;
+      }
+
+      activeExternalTargetRef.current = { iso: pendingISO, seq };
+
+      recenter();
+      requestAnimationFrame(() => {
+        if (activeExternalTargetRef.current?.seq !== seq) return;
+        listRef.current?.scrollToIndex({
+          index: PAGER_CENTER_INDEX + d,
+          animated: true,
+        });
       });
-    });
+    }, 60);
   }, [selectedISO, recenter, getLastSource]);
+
+  const onScroll = useCallback(
+    (e) => {
+      if (isResettingRef.current) return;
+      if (activeExternalTargetRef.current) return; // si viene del calendario, no preview
+
+      const x = e.nativeEvent.contentOffset.x;
+      const idxFloat = x / SCREEN_W;
+      const idx = Math.round(idxFloat);
+      const rawDelta = idx - PAGER_CENTER_INDEX;
+      const delta = Math.max(-PAGER_RANGE, Math.min(PAGER_RANGE, rawDelta));
+
+      // Si volvimos al centro, restaura selección (si había preview)
+      if (!delta) {
+        if (lastPreviewDeltaRef.current !== 0) {
+          lastPreviewDeltaRef.current = 0;
+          setSelectedISO(toISODateLocal(cursorRef.current), "timeline_preview");
+        }
+        return;
+      }
+
+      if (delta === lastPreviewDeltaRef.current) return;
+      lastPreviewDeltaRef.current = delta;
+
+      const previewDate = addDays(cursorRef.current, delta);
+      setSelectedISO(toISODateLocal(previewDate), "timeline_preview");
+    },
+    [setSelectedISO]
+  );
 
   const onEnd = useCallback(
     (e) => {
@@ -165,13 +228,24 @@ export default function DayTimeline({ rowHeight = DEFAULT_ROW_H, initialDate }) 
 
       const x = e.nativeEvent.contentOffset.x;
       const idx = Math.round(x / SCREEN_W);
-      if (idx === PAGER_CENTER_INDEX) return;
+      if (idx === PAGER_CENTER_INDEX) {
+        // Si hubo preview y al final no se movió, restaurar.
+        if (lastPreviewDeltaRef.current !== 0) {
+          lastPreviewDeltaRef.current = 0;
+          setSelectedISO(toISODateLocal(cursorRef.current), "timeline_preview");
+        }
+        return;
+      }
 
       // Si el cambio fue disparado por selección del calendario, “aterrizamos” al target.
-      const pendingISO = pendingExternalISORef.current;
-      if (pendingISO) {
+      const active = activeExternalTargetRef.current;
+      if (active?.iso) {
+        const target = parseISODateLocal(active.iso);
+        // Ignora onEnd viejos (por ejemplo, si el usuario tocó otro día y reinició la animación).
+        if (active.seq !== externalAnimSeqRef.current) return;
+
         pendingExternalISORef.current = null;
-        const target = parseISODateLocal(pendingISO);
+        activeExternalTargetRef.current = null;
         if (target) {
           setCursorDate(target);
         }
@@ -179,14 +253,17 @@ export default function DayTimeline({ rowHeight = DEFAULT_ROW_H, initialDate }) 
         return;
       }
 
-      const dir = idx === 2 ? 1 : -1;
-      const nextCursor = addDays(cursorRef.current, dir);
-      setCursorDate(nextCursor);
+      const delta = idx - PAGER_CENTER_INDEX;
+      if (!delta) return;
+      const nextCursor = addDays(cursorRef.current, delta);
 
+      lastPreviewDeltaRef.current = 0;
+
+      // Commit atómico para minimizar frames intermedios.
+      recenter();
+      setCursorDate(nextCursor);
       // Actualiza selección global: el calendario se mueve con esto.
       setSelectedISO(toISODateLocal(nextCursor), "timeline");
-
-      requestAnimationFrame(() => recenter());
     },
     [recenter, setSelectedISO]
   );
@@ -204,15 +281,25 @@ export default function DayTimeline({ rowHeight = DEFAULT_ROW_H, initialDate }) 
     <FlatList
       ref={listRef}
       data={data}
+      extraData={cursorDate.getTime()}
       horizontal
       pagingEnabled
+      decelerationRate="fast"
+      onScroll={onScroll}
+      scrollEventThrottle={16}
       showsHorizontalScrollIndicator={false}
       keyExtractor={(it) => it.key}
       renderItem={renderItem}
       getItemLayout={getLayout}
       initialScrollIndex={PAGER_CENTER_INDEX}
       onMomentumScrollEnd={onEnd}
-      onScrollToIndexFailed={recenter}
+      onScrollToIndexFailed={() => {
+        requestAnimationFrame(() => recenter());
+      }}
+      windowSize={3}
+      initialNumToRender={3}
+      maxToRenderPerBatch={3}
+      updateCellsBatchingPeriod={16}
     />
   );
 }

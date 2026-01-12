@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState, useCallback } from "react";
-import { Pressable, View } from "react-native";
+import { InteractionManager, Pressable, View } from "react-native";
 
 import { calendarLayoutStyles as styles } from "./styles";
 import { useCalendarSelection } from "../../app/hooks/useCalendarSelection";
@@ -25,7 +25,7 @@ export default function Calendario({
   initialSelectedISO = toISODate(new Date()),
   onChangeDate,
 }) {
-  const { selectedISO, setSelectedISO } = useCalendarSelection();
+  const { selectedISO, setSelectedISO, getLastSource } = useCalendarSelection();
   const selectedDate = useMemo(() => parseISODate(selectedISO), [selectedISO]);
 
   // ✅ weeks STATE (reconstruible on-demand)
@@ -86,11 +86,31 @@ export default function Calendario({
 
   // Si la selección viene de fuera (timeline, futuro: eventos), aseguramos scroll estable.
   const lastSelectedISORef = useRef(selectedISO);
+  const pendingSyncHandleRef = useRef(null);
   useEffect(() => {
     const prevISO = lastSelectedISORef.current;
     if (prevISO === selectedISO) return;
     lastSelectedISORef.current = selectedISO;
-    ensureAndScrollToDate(parseISODate(selectedISO), true);
+
+    const source = getLastSource?.() || "unknown";
+    const dateObj = parseISODate(selectedISO);
+
+    // Cancela una sincronización pendiente si existe.
+    pendingSyncHandleRef.current?.cancel?.();
+    pendingSyncHandleRef.current = null;
+
+    if (source === "timeline" || source === "timeline_preview") {
+      // Cuando vienes del timeline, prioriza que el gesto se sienta fluido.
+      // Pero una vez que el timeline ya hizo commit (onMomentumScrollEnd),
+      // queremos que el compacto se sincronice casi inmediato.
+      // Lo hacemos en el siguiente frame y sin animación.
+      requestAnimationFrame(() => {
+        ensureAndScrollToDate(dateObj, false);
+      });
+      return;
+    }
+
+    ensureAndScrollToDate(dateObj, true);
   }, [selectedISO, ensureAndScrollToDate]);
 
   // init: ubicar índice inicial según selectedDate
