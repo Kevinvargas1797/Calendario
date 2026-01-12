@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState, useCallback } from "react";
-import { View, FlatList, Animated, Pressable } from "react-native";
+import { View, Animated, Pressable, ScrollView } from "react-native";
 import { monthModalStyles as styles, SCREEN_W, MONTH_CELL_H, calendarLayoutStyles as layoutStyles } from "../styles";
 import { spacing } from "../../../theme";
 import MonthPage from "./MonthPage";
@@ -36,20 +36,25 @@ export default function MonthModal({
 
   // evita doble-trigger cuando reciclamos al centro
   const isResettingRef = useRef(false);
+  const ignoreMomentumUntilRef = useRef(0);
 
-  // 3 páginas (prev/current/next)
-  const data = useMemo(() => {
-    const cur = cursorMonth;
+  // 3 páginas fijas: usamos ScrollView para evitar reciclado/virtualización del FlatList.
+  const pages = useMemo(() => {
+    const cur = startOfMonth(cursorMonth);
     const prev = addMonths(cur, -1);
     const next = addMonths(cur, 1);
-    return [
-      { key: toISODate(prev), monthStartISO: toISODate(prev) },
-      { key: toISODate(cur), monthStartISO: toISODate(cur) },
-      { key: toISODate(next), monthStartISO: toISODate(next) },
-    ];
+    return {
+      prev: { key: "prev", monthStartISO: toISODate(prev) },
+      cur: { key: "cur", monthStartISO: toISODate(cur) },
+      next: { key: "next", monthStartISO: toISODate(next) },
+    };
   }, [cursorMonth]);
 
-  const listRef = useRef(null);
+  const scrollRef = useRef(null);
+
+  const recenterToMiddle = useCallback(() => {
+    scrollRef.current?.scrollTo({ x: SCREEN_W, y: 0, animated: false });
+  }, []);
 
   const openInstant = () => {
     closingRef.current = false;
@@ -79,7 +84,9 @@ export default function MonthModal({
         openInstant();
         requestAnimationFrame(() => {
           isResettingRef.current = true;
-          listRef.current?.scrollToIndex({ index: 1, animated: false });
+          // En algunos devices RN dispara onMomentumScrollEnd extra después del recenter.
+          ignoreMomentumUntilRef.current = Date.now() + 300;
+          recenterToMiddle();
           requestAnimationFrame(() => {
             isResettingRef.current = false;
           });
@@ -91,51 +98,34 @@ export default function MonthModal({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [visible]);
 
-  const renderMonth = useCallback(
-    ({ item }) => (
-      <MonthPage
-        item={item}
-        selectedDate={selectedDate}
-        onPickDay={(day) => {
-          onPickDay?.(day);
-          requestAnimationFrame(() => closeInstant());
-        }}
-      />
-    ),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [selectedDate, onPickDay]
-  );
-
-  const getLayout = useCallback((_, index) => {
-    return { length: SCREEN_W, offset: SCREEN_W * index, index };
-  }, []);
-
   const onEnd = (e) => {
     if (isResettingRef.current) return;
+
+    const now = Date.now();
+    if (now < ignoreMomentumUntilRef.current) return;
 
     const x = e.nativeEvent.contentOffset.x;
     const idx = Math.round(x / SCREEN_W);
 
     if (idx === 1) return;
 
+    // Bloquea inmediatamente: el recenter puede disparar otro onEnd.
+    isResettingRef.current = true;
+    ignoreMomentumUntilRef.current = Date.now() + 350;
+
     const dir = idx === 2 ? 1 : -1;
     const cur = cursorRef.current;
     const nextCursor = addMonths(cur, dir);
 
-    // actualiza cursor
+    // Hacemos el recenter y el commit del mes en el MISMO tick para evitar
+    // un frame intermedio donde el panel está centrado pero con el mes anterior.
+    recenterToMiddle();
     cursorRef.current = nextCursor;
     setCursorMonth(nextCursor);
-
-    // notifica para sincronizar compacto (header/semana/selección)
     onMonthChange?.(nextCursor);
 
-    // recicla al centro (sin disparar loops)
     requestAnimationFrame(() => {
-      isResettingRef.current = true;
-      listRef.current?.scrollToIndex({ index: 1, animated: false });
-      requestAnimationFrame(() => {
-        isResettingRef.current = false;
-      });
+      isResettingRef.current = false;
     });
   };
 
@@ -152,28 +142,49 @@ export default function MonthModal({
         ]}
       >
         <View style={{ height: monthGridH }}>
-          <FlatList
-            ref={listRef}
-            data={data}
+          <ScrollView
+            ref={scrollRef}
             horizontal
             pagingEnabled
-            disableIntervalMomentum
             bounces={false}
             overScrollMode="never"
             showsHorizontalScrollIndicator={false}
-            keyExtractor={(it) => it.key}
-            renderItem={renderMonth}
-            getItemLayout={getLayout}
-            initialScrollIndex={1}
-            onMomentumScrollEnd={onEnd}
-            // ultra-virtualización (aunque solo son 3 items)
-            windowSize={3}
-            initialNumToRender={1}
-            maxToRenderPerBatch={1}
-            updateCellsBatchingPeriod={16}
-            removeClippedSubviews
             scrollEventThrottle={16}
-          />
+            onMomentumScrollEnd={onEnd}
+          >
+            <View style={{ width: SCREEN_W }}>
+              <MonthPage
+                item={pages.prev}
+                selectedDate={selectedDate}
+                onPickDay={(day) => {
+                  onPickDay?.(day);
+                  requestAnimationFrame(() => closeInstant());
+                }}
+              />
+            </View>
+
+            <View style={{ width: SCREEN_W }}>
+              <MonthPage
+                item={pages.cur}
+                selectedDate={selectedDate}
+                onPickDay={(day) => {
+                  onPickDay?.(day);
+                  requestAnimationFrame(() => closeInstant());
+                }}
+              />
+            </View>
+
+            <View style={{ width: SCREEN_W }}>
+              <MonthPage
+                item={pages.next}
+                selectedDate={selectedDate}
+                onPickDay={(day) => {
+                  onPickDay?.(day);
+                  requestAnimationFrame(() => closeInstant());
+                }}
+              />
+            </View>
+          </ScrollView>
         </View>
 
         <Pressable

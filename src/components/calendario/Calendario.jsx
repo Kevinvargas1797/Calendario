@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useRef, useState, useCallback } from "react"
 import { Pressable, View } from "react-native";
 
 import { calendarLayoutStyles as styles } from "./styles";
+import { useCalendarSelection } from "../../app/hooks/useCalendarSelection";
 import TopBar from "./parts/TopBar";
 import HeaderRow from "./parts/HeaderRow";
 import WeekPager from "./parts/WeekPager";
@@ -24,7 +25,7 @@ export default function Calendario({
   initialSelectedISO = toISODate(new Date()),
   onChangeDate,
 }) {
-  const [selectedISO, setSelectedISO] = useState(initialSelectedISO);
+  const { selectedISO, setSelectedISO } = useCalendarSelection();
   const selectedDate = useMemo(() => parseISODate(selectedISO), [selectedISO]);
 
   // ✅ weeks STATE (reconstruible on-demand)
@@ -77,11 +78,20 @@ export default function Calendario({
   const handleSelect = useCallback(
     (dateObj) => {
       const iso = toISODate(dateObj);
-      setSelectedISO(iso);
+      setSelectedISO(iso, "calendar");
       onChangeDate?.(iso);
     },
-    [onChangeDate]
+    [onChangeDate, setSelectedISO]
   );
+
+  // Si la selección viene de fuera (timeline, futuro: eventos), aseguramos scroll estable.
+  const lastSelectedISORef = useRef(selectedISO);
+  useEffect(() => {
+    const prevISO = lastSelectedISORef.current;
+    if (prevISO === selectedISO) return;
+    lastSelectedISORef.current = selectedISO;
+    ensureAndScrollToDate(parseISODate(selectedISO), true);
+  }, [selectedISO, ensureAndScrollToDate]);
 
   // init: ubicar índice inicial según selectedDate
   useEffect(() => {
