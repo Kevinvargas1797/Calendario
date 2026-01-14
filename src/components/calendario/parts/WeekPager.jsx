@@ -57,7 +57,12 @@ const DayCell = memo(
         style={({ pressed }) => [styles.dayCell, pressed && styles.dayCellPressed]}
       >
         <Animated.View style={{ transform: [{ scale }], opacity: fade }}>
-          <View style={[styles.dayCircle, isSel && styles.dayCircleSelected]}>
+          <View
+            style={[
+              styles.dayCircle,
+              isSel && (isT ? styles.dayCircleSelectedToday : styles.dayCircleSelected),
+            ]}
+          >
             <Text
               style={[
                 styles.dayNumber,

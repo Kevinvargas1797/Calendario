@@ -11,8 +11,6 @@ export default function TopBar({
   date,
   expanded,
   onToggleMonth,
-  onPrevWeek,
-  onNextWeek,
 }) {
   const topLabel = useMemo(
     () => capitalize(format(date, "EEE, d", { locale: es })),
@@ -60,15 +58,6 @@ export default function TopBar({
           />
         </Animated.View>
       </Pressable>
-
-      <View style={styles.navBtns}>
-        <Pressable onPress={onPrevWeek} style={styles.navBtn} hitSlop={8}>
-          <Text style={styles.navBtnText}>‹</Text>
-        </Pressable>
-        <Pressable onPress={onNextWeek} style={styles.navBtn} hitSlop={8}>
-          <Text style={styles.navBtnText}>›</Text>
-        </Pressable>
-      </View>
     </View>
   );
 }

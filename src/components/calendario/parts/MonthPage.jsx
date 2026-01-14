@@ -46,7 +46,7 @@ function MonthPage({ item, selectedDate, onPickDay }) {
                   <View
                     style={[
                       styles.monthDayCircle,
-                      isSel && styles.monthDayCircleSelected,
+                      isSel && (isT ? styles.monthDayCircleSelectedToday : styles.monthDayCircleSelected),
                       !isSel && isT && styles.monthDayCircleToday,
                     ]}
                   >

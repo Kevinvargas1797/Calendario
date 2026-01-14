@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState, useCallback } from "react";
-import { View, Animated, Pressable, ScrollView } from "react-native";
+import { View, Animated, Pressable, ScrollView, Easing } from "react-native";
 import { monthModalStyles as styles, SCREEN_W, MONTH_CELL_H, calendarLayoutStyles as layoutStyles } from "../styles";
 import { spacing } from "../../../theme";
 import MonthPage from "./MonthPage";
@@ -24,6 +24,8 @@ export default function MonthModal({
   );
   const calendarH = useMemo(() => monthGridH + panelExtraH, [monthGridH, panelExtraH]);
   const animH = useRef(new Animated.Value(0)).current;
+
+  const openAnimInFlightRef = useRef(false);
 
   // cursor del mes (siempre startOfMonth)
   const [cursorMonth, setCursorMonth] = useState(() =>
@@ -56,20 +58,34 @@ export default function MonthModal({
     scrollRef.current?.scrollTo({ x: SCREEN_W, y: 0, animated: false });
   }, []);
 
-  const openInstant = () => {
+  const openFast = () => {
     closingRef.current = false;
     animH.stopAnimation();
-    animH.setValue(calendarH); // PUM
+    openAnimInFlightRef.current = true;
+    Animated.timing(animH, {
+      toValue: calendarH,
+      duration: 140,
+      easing: Easing.out(Easing.cubic),
+      useNativeDriver: false,
+    }).start(() => {
+      openAnimInFlightRef.current = false;
+    });
   };
 
-  const closeInstant = () => {
+  const closeFast = () => {
     if (closingRef.current) return;
     closingRef.current = true;
 
     animH.stopAnimation();
-    animH.setValue(0); // PUM
-    setMounted(false);
-    onClose?.();
+    Animated.timing(animH, {
+      toValue: 0,
+      duration: 110,
+      easing: Easing.out(Easing.cubic),
+      useNativeDriver: false,
+    }).start(() => {
+      setMounted(false);
+      onClose?.();
+    });
   };
 
   // al abrir, sincroniza cursor al mes del selected
@@ -81,7 +97,7 @@ export default function MonthModal({
       setCursorMonth(m);
 
       requestAnimationFrame(() => {
-        openInstant();
+        openFast();
         requestAnimationFrame(() => {
           isResettingRef.current = true;
           // En algunos devices RN dispara onMomentumScrollEnd extra después del recenter.
@@ -93,7 +109,7 @@ export default function MonthModal({
         });
       });
     } else {
-      if (mounted) closeInstant();
+      if (mounted) closeFast();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [visible]);
@@ -133,7 +149,7 @@ export default function MonthModal({
 
   return (
     <View style={styles.overlayRoot} pointerEvents="box-none">
-      <Pressable style={styles.overlayBackdrop} onPress={closeInstant} />
+      <Pressable style={styles.overlayBackdrop} onPress={closeFast} />
 
       <Animated.View
         style={[
@@ -158,7 +174,7 @@ export default function MonthModal({
                 selectedDate={selectedDate}
                 onPickDay={(day) => {
                   onPickDay?.(day);
-                  requestAnimationFrame(() => closeInstant());
+                  requestAnimationFrame(() => closeFast());
                 }}
               />
             </View>
@@ -169,7 +185,7 @@ export default function MonthModal({
                 selectedDate={selectedDate}
                 onPickDay={(day) => {
                   onPickDay?.(day);
-                  requestAnimationFrame(() => closeInstant());
+                  requestAnimationFrame(() => closeFast());
                 }}
               />
             </View>
@@ -180,7 +196,7 @@ export default function MonthModal({
                 selectedDate={selectedDate}
                 onPickDay={(day) => {
                   onPickDay?.(day);
-                  requestAnimationFrame(() => closeInstant());
+                  requestAnimationFrame(() => closeFast());
                 }}
               />
             </View>
@@ -188,7 +204,7 @@ export default function MonthModal({
         </View>
 
         <Pressable
-          onPress={closeInstant}
+          onPress={closeFast}
           hitSlop={12}
           accessibilityRole="button"
           accessibilityLabel="Contraer calendario"

@@ -30,6 +30,9 @@ export const weekPagerStyles = StyleSheet.create({
   dayCircleSelected: {
     backgroundColor: colors.accentDark,
   },
+  dayCircleSelectedToday: {
+    backgroundColor: colors.accentPrimary,
+  },
   dayNumber: {
     fontSize: DAY_FONT,
     fontWeight: "800",

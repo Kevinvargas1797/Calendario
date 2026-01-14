@@ -35,7 +35,15 @@ export function CalendarSelectionProvider({ children, initialSelectedISO }) {
   const setSelectedISO = useCallback((nextISO, source = "unknown") => {
     if (typeof nextISO !== "string") return;
     setSelectedISOState((prev) => {
-      if (prev === nextISO) return prev;
+      if (prev === nextISO) {
+        // Si el timeline ya adelantó la selección en "preview", el commit final
+        // debe vibrar aunque el ISO no cambie.
+        if (source === "timeline" && lastSourceRef.current === "timeline_preview") {
+          lastSourceRef.current = source;
+          triggerHaptic(source);
+        }
+        return prev;
+      }
       lastSourceRef.current = source;
       triggerHaptic(source);
       return nextISO;

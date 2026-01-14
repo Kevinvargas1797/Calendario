@@ -1,93 +1,32 @@
-import React, { memo, useCallback, useMemo, useRef, useState } from "react";
-import { Dimensions, FlatList, ScrollView, StyleSheet, Text, View } from "react-native";
-import { addDays, differenceInCalendarDays, startOfToday } from "date-fns";
+import React, { useCallback, useMemo, useRef, useState, useEffect } from "react";
+import { Dimensions, FlatList, StyleSheet, Text, View, Pressable } from "react-native";
+import { addDays, differenceInCalendarDays, isSameDay, startOfToday } from "date-fns";
 
 import { colors, spacing, typography } from "../../theme";
 import { useCalendarSelection } from "../../app/hooks/useCalendarSelection";
 
-const LABEL_COL_WIDTH = 52;
-const MINUTE_MARKS = [0, 15, 30, 45];
-const DEFAULT_ROW_H = 68;
+import DayTimelinePage from "./parts/DayTimelinePage";
+import { parseISODateLocal, toISODateLocal } from "./utils/date";
+
+const LABEL_COL_WIDTH = 60;
+// Keep the pill inside the hour-label column. We align the line start to the
+// pill's right edge so there's no white gap.
+const NOW_PILL_RIGHT_INSET = spacing.sm; // align with hour-label paddingRight
+const NOW_PILL_OVERFLOW_RIGHT = 3;
+const NOW_LINE_JOIN_OVERLAP = 2;
+const DEFAULT_ROW_H = 80;
 
 const { width: SCREEN_W } = Dimensions.get("window");
 const PAGER_RANGE = 5; // permite saltar hasta 5 días en un swipe
 const PAGER_CENTER_INDEX = PAGER_RANGE;
 
-function formatHourLabel(h) {
-  const isPM = h >= 12;
-  const hour12 = ((h + 11) % 12) + 1;
-  return `${hour12} ${isPM ? "p.m." : "a.m."}`;
-}
-
-function toISODateLocal(date) {
-  const y = date.getFullYear();
-  const m = String(date.getMonth() + 1).padStart(2, "0");
-  const d = String(date.getDate()).padStart(2, "0");
-  return `${y}-${m}-${d}`;
-}
-
-function parseISODateLocal(iso) {
-  if (typeof iso !== "string") return null;
-  const parts = iso.split("-");
-  if (parts.length !== 3) return null;
-  const year = Number(parts[0]);
-  const monthIndex = Number(parts[1]) - 1;
-  const day = Number(parts[2]);
-  if (!Number.isFinite(year) || !Number.isFinite(monthIndex) || !Number.isFinite(day)) return null;
-  return new Date(year, monthIndex, day);
-}
-
-const HourRow = memo(function HourRow({ hour, rowH }) {
-  const minuteHeight = rowH / MINUTE_MARKS.length;
-
-  return (
-    <View style={[styles.row, { height: rowH }]}>
-      {MINUTE_MARKS.map((minute) => {
-        const isHourLine = minute === 0;
-
-        return (
-          <View
-            key={`${hour}-${minute}`}
-            style={[styles.minuteRow, { height: minuteHeight }]}
-          >
-            <View style={styles.labelCol}>
-              <Text style={isHourLine ? styles.hourText : styles.minuteText}>
-                {isHourLine
-                  ? formatHourLabel(hour)
-                  : minute.toString().padStart(2, "0")}
-              </Text>
-            </View>
-
-            <View
-              style={[
-                styles.minuteLine,
-                isHourLine ? styles.minuteLinePrimary : styles.minuteLineSecondary,
-              ]}
-            />
-          </View>
-        );
-      })}
-    </View>
-  );
-});
-
-const DayTimelinePage = memo(function DayTimelinePage({ rowHeight, hours }) {
-  return (
-    <ScrollView
-      style={styles.scroll}
-      contentContainerStyle={styles.content}
-      showsVerticalScrollIndicator={false}
-    >
-      {hours.map((h) => (
-        <HourRow key={h} hour={h} rowH={rowHeight} />
-      ))}
-    </ScrollView>
-  );
-});
-
 export default function DayTimeline({ rowHeight = DEFAULT_ROW_H, initialDate }) {
   const { selectedISO, setSelectedISO, getLastSource } = useCalendarSelection();
   const hours = useMemo(() => Array.from({ length: 24 }, (_, i) => i), []);
+
+  // Drives real-time updates of the "now" marker (line + pill label).
+  // Without this, the marker would stay stuck at the time of the last render.
+  const [nowTick, setNowTick] = useState(() => Date.now());
 
   const [cursorDate, setCursorDate] = useState(() => {
     const fromISO = parseISODateLocal(selectedISO);
@@ -95,6 +34,65 @@ export default function DayTimeline({ rowHeight = DEFAULT_ROW_H, initialDate }) 
   });
   const cursorRef = useRef(cursorDate);
   cursorRef.current = cursorDate;
+
+  const pageScrollRefs = useRef({});
+
+  // Mantener la posición vertical (hora) consistente entre páginas/días.
+  const lastScrollYRef = useRef(0);
+
+  const isTodaySelected = useMemo(() => isSameDay(cursorDate, new Date()), [cursorDate]);
+
+  useEffect(() => {
+    if (!isTodaySelected) return;
+
+    let intervalId;
+    const timeoutId = setTimeout(() => {
+      setNowTick(Date.now());
+      intervalId = setInterval(() => setNowTick(Date.now()), 60_000);
+    }, 60_000 - (Date.now() % 60_000));
+
+    return () => {
+      clearTimeout(timeoutId);
+      if (intervalId) clearInterval(intervalId);
+    };
+  }, [isTodaySelected]);
+
+  const nowY = useMemo(() => {
+    if (!isTodaySelected) return null;
+    void nowTick;
+    const now = new Date();
+    const minutes = now.getHours() * 60 + now.getMinutes();
+    return (minutes / 60) * rowHeight;
+  }, [isTodaySelected, rowHeight, nowTick]);
+
+  const nowLabel = useMemo(() => {
+    if (!isTodaySelected) return null;
+    void nowTick;
+    const now = new Date();
+    const h12 = now.getHours() % 12 || 12;
+    const mm = String(now.getMinutes()).padStart(2, "0");
+    return `${h12}:${mm}`;
+  }, [isTodaySelected, nowTick]);
+
+  const scrollToNow = useCallback(
+    (animated = true) => {
+      if (!isTodaySelected) return;
+      if (typeof nowY !== "number") return;
+      const ref = pageScrollRefs.current?.d0;
+      const targetY = Math.max(0, nowY - rowHeight * 1.2);
+      ref?.scrollTo?.({ y: targetY, animated });
+    },
+    [isTodaySelected, nowY, rowHeight]
+  );
+
+  const handleTodayPress = useCallback(() => {
+    const today = startOfToday();
+    if (!isSameDay(cursorRef.current, today)) {
+      setSelectedISO(toISODateLocal(today), "today_button");
+      return;
+    }
+    scrollToNow(true);
+  }, [setSelectedISO, scrollToNow]);
 
   // Páginas fijas (deltas -R..R). Permite avanzar varios días con un swipe rápido.
   const data = useMemo(() => {
@@ -115,6 +113,11 @@ export default function DayTimeline({ rowHeight = DEFAULT_ROW_H, initialDate }) 
   // Preview: cambia selectedISO en medio del swipe (cuando ya pasó el umbral)
   const lastPreviewDeltaRef = useRef(0);
 
+  // Durante el drag horizontal, pre-sincroniza la página vecina (d-1 o d+1)
+  // para que no se vea que "arranca" en otra hora.
+  const lastPreSyncDirRef = useRef(0);
+  const lastPreSyncYRef = useRef(0);
+
   const getLayout = useCallback((_, index) => {
     return { length: SCREEN_W, offset: SCREEN_W * index, index };
   }, []);
@@ -126,6 +129,20 @@ export default function DayTimeline({ rowHeight = DEFAULT_ROW_H, initialDate }) 
       isResettingRef.current = false;
     });
   }, []);
+
+  // Evitar saltos visuales: NO auto-scroll a "now" al cambiar de día.
+  // Si quieres ir a la hora actual, el botón "Hoy" (cuando ya estás en hoy) lo hace.
+  const didInitNowScrollRef = useRef(false);
+  useEffect(() => {
+    if (didInitNowScrollRef.current) return;
+    if (!isTodaySelected) return;
+    const source = getLastSource?.() || "unknown";
+    if (source !== "init") return;
+    didInitNowScrollRef.current = true;
+    requestAnimationFrame(() => {
+      scrollToNow(false);
+    });
+  }, [isTodaySelected, scrollToNow, getLastSource]);
 
   // Si el calendario cambia la selección, sincronizamos el cursor del timeline.
   React.useEffect(() => {
@@ -146,9 +163,9 @@ export default function DayTimeline({ rowHeight = DEFAULT_ROW_H, initialDate }) 
       return;
     }
 
-    // Viene del calendario: animamos hacia izq/der según dirección.
-    const diff = differenceInCalendarDays(fromISO, cur || fromISO);
-    if (!diff) return;
+    // Selección externa (por ejemplo, calendario compacto/extendido):
+    // - Si viene del calendario: animar SIEMPRE exactamente 1 página (±1) hacia el día destino.
+    // - Si viene de otros orígenes: animar dentro de rango ±5, si no, aterrizar directo.
 
     // Coalesce: si el usuario toca días muy rápido, animamos solo hacia el último.
     externalAnimSeqRef.current += 1;
@@ -167,26 +184,24 @@ export default function DayTimeline({ rowHeight = DEFAULT_ROW_H, initialDate }) 
       const base = cursorRef.current;
       if (!pendingISO || !target || !base) return;
 
-      const d = differenceInCalendarDays(target, base);
-      if (!d) return;
+      const rawDiff = differenceInCalendarDays(target, base);
+      if (!rawDiff) return;
 
-      // Si el salto cabe dentro del rango, animamos hasta esa página.
-      // Si es un salto grande, aterrizamos directo (evita animación rara).
-      if (Math.abs(d) > PAGER_RANGE) {
-        activeExternalTargetRef.current = null;
-        pendingExternalISORef.current = null;
-        setCursorDate(target);
-        requestAnimationFrame(() => recenter());
-        return;
-      }
+      // Para cualquier cambio EXTERNO (calendario, botón Hoy, etc.),
+      // animamos exactamente 1 página (±1) y luego “aterrizamos” al target en onEnd.
+      // Esto evita animaciones múltiples y mantiene un UX consistente.
+      let delta = Math.sign(rawDiff);
+
+      if (!delta) return;
 
       activeExternalTargetRef.current = { iso: pendingISO, seq };
 
       recenter();
       requestAnimationFrame(() => {
         if (activeExternalTargetRef.current?.seq !== seq) return;
+        // Garantizado en rango: delta ∈ {-1,1} para calendar, o delta ∈ [-5..5] para otros.
         listRef.current?.scrollToIndex({
-          index: PAGER_CENTER_INDEX + d,
+          index: PAGER_CENTER_INDEX + delta,
           animated: true,
         });
       });
@@ -199,6 +214,23 @@ export default function DayTimeline({ rowHeight = DEFAULT_ROW_H, initialDate }) 
       if (activeExternalTargetRef.current) return; // si viene del calendario, no preview
 
       const x = e.nativeEvent.contentOffset.x;
+
+       // Mientras arrastras (sin soltar), la página vecina se empieza a ver antes de
+       // que el índice "redondee" a 1. La sincronizamos continuamente.
+      const centerX = SCREEN_W * PAGER_CENTER_INDEX;
+      const dir = Math.sign(x - centerX); // -1 (izq) | 0 | 1 (der)
+      if (dir !== 0) {
+        const y = lastScrollYRef.current || 0;
+        if (dir !== lastPreSyncDirRef.current || Math.abs(y - (lastPreSyncYRef.current || 0)) > 0.5) {
+          lastPreSyncDirRef.current = dir;
+          lastPreSyncYRef.current = y;
+          const key = `d${dir}`;
+          pageScrollRefs.current?.[key]?.scrollTo?.({ y, animated: false });
+        }
+      } else {
+        lastPreSyncDirRef.current = 0;
+      }
+
       const idxFloat = x / SCREEN_W;
       const idx = Math.round(idxFloat);
       const rawDelta = idx - PAGER_CENTER_INDEX;
@@ -218,6 +250,11 @@ export default function DayTimeline({ rowHeight = DEFAULT_ROW_H, initialDate }) 
 
       const previewDate = addDays(cursorRef.current, delta);
       setSelectedISO(toISODateLocal(previewDate), "timeline_preview");
+
+      // Pre-sincroniza el scroll vertical del target para que el swipe no muestre un salto.
+      const key = `d${delta}`;
+      const y = lastScrollYRef.current || 0;
+      pageScrollRefs.current?.[key]?.scrollTo?.({ y, animated: false });
     },
     [setSelectedISO]
   );
@@ -247,6 +284,7 @@ export default function DayTimeline({ rowHeight = DEFAULT_ROW_H, initialDate }) 
         pendingExternalISORef.current = null;
         activeExternalTargetRef.current = null;
         if (target) {
+          cursorRef.current = target;
           setCursorDate(target);
         }
         requestAnimationFrame(() => recenter());
@@ -261,6 +299,7 @@ export default function DayTimeline({ rowHeight = DEFAULT_ROW_H, initialDate }) 
 
       // Commit atómico para minimizar frames intermedios.
       recenter();
+      cursorRef.current = nextCursor;
       setCursorDate(nextCursor);
       // Actualiza selección global: el calendario se mueve con esto.
       setSelectedISO(toISODateLocal(nextCursor), "timeline");
@@ -269,42 +308,74 @@ export default function DayTimeline({ rowHeight = DEFAULT_ROW_H, initialDate }) 
   );
 
   const renderItem = useCallback(
-    () => (
+    ({ item }) => (
       <View style={[styles.page, { width: SCREEN_W }]}>
-        <DayTimelinePage rowHeight={rowHeight} hours={hours} />
+        <DayTimelinePage
+          ref={(r) => {
+            if (r) pageScrollRefs.current[item.key] = r;
+          }}
+          rowHeight={rowHeight}
+          hours={hours}
+          showNowLine={isTodaySelected && item.delta === 0}
+          nowY={nowY}
+          nowLabel={nowLabel}
+          onScroll={(e) => {
+            const y = e?.nativeEvent?.contentOffset?.y;
+            if (typeof y === "number") lastScrollYRef.current = y;
+          }}
+          styles={styles}
+        />
       </View>
     ),
-    [hours, rowHeight]
+    [hours, rowHeight, isTodaySelected, nowY, nowLabel]
   );
 
   return (
-    <FlatList
-      ref={listRef}
-      data={data}
-      extraData={cursorDate.getTime()}
-      horizontal
-      pagingEnabled
-      decelerationRate="fast"
-      onScroll={onScroll}
-      scrollEventThrottle={16}
-      showsHorizontalScrollIndicator={false}
-      keyExtractor={(it) => it.key}
-      renderItem={renderItem}
-      getItemLayout={getLayout}
-      initialScrollIndex={PAGER_CENTER_INDEX}
-      onMomentumScrollEnd={onEnd}
-      onScrollToIndexFailed={() => {
-        requestAnimationFrame(() => recenter());
-      }}
-      windowSize={3}
-      initialNumToRender={3}
-      maxToRenderPerBatch={3}
-      updateCellsBatchingPeriod={16}
-    />
+    <View style={styles.panContainer}>
+      <FlatList
+        ref={listRef}
+        data={data}
+        extraData={cursorDate.getTime()}
+        horizontal
+        pagingEnabled
+        decelerationRate="fast"
+        onScroll={onScroll}
+        scrollEventThrottle={16}
+        showsHorizontalScrollIndicator={false}
+        keyExtractor={(it) => it.key}
+        renderItem={renderItem}
+        getItemLayout={getLayout}
+        initialScrollIndex={PAGER_CENTER_INDEX}
+        onMomentumScrollEnd={onEnd}
+        onScrollToIndexFailed={() => {
+          requestAnimationFrame(() => recenter());
+        }}
+        windowSize={3}
+        initialNumToRender={3}
+        maxToRenderPerBatch={3}
+        updateCellsBatchingPeriod={16}
+      />
+
+      <View pointerEvents="box-none" style={styles.todayButtonLayer}>
+        <Pressable
+          onPress={handleTodayPress}
+          style={({ pressed }) => [styles.todayButton, pressed && styles.todayButtonPressed]}
+          accessibilityRole="button"
+          accessibilityLabel="Ir al día de hoy"
+        >
+          <Text style={styles.todayButtonText}>Hoy</Text>
+        </Pressable>
+      </View>
+    </View>
   );
 }
 
 const styles = StyleSheet.create({
+  panContainer: {
+    flex: 1,
+    backgroundColor: colors.backgroundPrimary,
+    position: "relative",
+  },
   page: {
     flex: 1,
     backgroundColor: colors.backgroundPrimary,
@@ -314,7 +385,64 @@ const styles = StyleSheet.create({
     backgroundColor: colors.backgroundPrimary,
   },
   content: {
-    paddingBottom: spacing.lg,
+    paddingBottom: spacing.xl,
+  },
+  gridWrap: {
+    position: "relative",
+  },
+  nowLineWrap: {
+    position: "absolute",
+    left: 0,
+    right: 0,
+    height: 24,
+    justifyContent: "center",
+  },
+  nowLineRule: {
+    position: "absolute",
+    left:
+      LABEL_COL_WIDTH -
+      NOW_PILL_RIGHT_INSET +
+      NOW_PILL_OVERFLOW_RIGHT -
+      NOW_LINE_JOIN_OVERLAP,
+    right: 0,
+    height: 2,
+    top: "50%",
+    marginTop: -1,
+    backgroundColor: colors.accentPrimary,
+    opacity: 0.95,
+  },
+  nowPillWrap: {
+    position: "absolute",
+    left: 0,
+    width: LABEL_COL_WIDTH,
+    top: 0,
+    bottom: 0,
+    justifyContent: "center",
+    alignItems: "flex-end",
+    paddingLeft: spacing.xs,
+    paddingRight: NOW_PILL_RIGHT_INSET,
+    overflow: "visible",
+  },
+  nowPill: {
+    backgroundColor: colors.accentPrimary,
+    paddingHorizontal: spacing.xs + 3,
+    paddingVertical: 0,
+    minHeight: 18,
+    minWidth: 42,
+    borderRadius: 999,
+    justifyContent: "center",
+    alignItems: "center",
+    marginRight: -NOW_PILL_OVERFLOW_RIGHT,
+  },
+  nowPillText: {
+    color: colors.backgroundPrimary,
+    fontSize: 12,
+    lineHeight: 13,
+    fontWeight: "800",
+    letterSpacing: 0,
+    textAlign: "center",
+    includeFontPadding: false,
+    fontVariant: ["tabular-nums"],
   },
   row: {
     flexDirection: "column",
@@ -325,26 +453,80 @@ const styles = StyleSheet.create({
   },
   labelCol: {
     width: LABEL_COL_WIDTH,
+    paddingLeft: spacing.md,
     paddingRight: spacing.sm,
     alignItems: "flex-end",
   },
-  hourText: {
-    ...typography.caption,
-    color: colors.textSecondary,
+  hourLabelRow: {
+    flexDirection: "row",
+    alignItems: "baseline",
+    justifyContent: "flex-end",
+    gap: 2,
+  },
+  // Place labels on the divider line (not inside the 15-min block), matching the
+  // iOS-style day view where the hour label aligns with the hour line.
+  hourLabelOnLine: {
+    marginTop: -8,
+  },
+  hourNumberText: {
+    fontSize: 15,
+    lineHeight: 17,
+    fontWeight: "600",
+    color: colors.textPrimary,
+    includeFontPadding: false,
+  },
+  hourSuffixText: {
+    fontSize: 11,
+    lineHeight: 13,
+    fontWeight: "600",
+    color: colors.textMuted,
+    opacity: 0.7,
+    includeFontPadding: false,
   },
   minuteText: {
-    ...typography.caption,
+    fontSize: 9,
+    fontWeight: "500",
     color: colors.textMuted,
+    opacity: 0.65,
+  },
+  minuteTextOnLine: {
+    marginTop: -7,
   },
   minuteLine: {
     flex: 1,
     height: 1,
+    alignSelf: "flex-start",
     backgroundColor: colors.divider,
   },
   minuteLinePrimary: {
     opacity: 1,
   },
   minuteLineSecondary: {
-    opacity: 0.45,
+    opacity: 0.22,
+  },
+  todayButtonLayer: {
+    position: "absolute",
+    bottom: spacing.lg,
+    right: spacing.lg,
+  },
+  todayButton: {
+    backgroundColor: colors.accentPrimary,
+    borderRadius: 999,
+    paddingHorizontal: spacing.xl,
+    paddingVertical: spacing.sm + 2,
+    shadowColor: colors.accentDark,
+    shadowOpacity: 0.2,
+    shadowRadius: 8,
+    shadowOffset: { width: 0, height: 4 },
+    elevation: 5,
+  },
+  todayButtonPressed: {
+    transform: [{ scale: 0.97 }],
+    opacity: 0.9,
+  },
+  todayButtonText: {
+    color: colors.backgroundPrimary,
+    fontWeight: "700",
+    letterSpacing: 0.4,
   },
 });

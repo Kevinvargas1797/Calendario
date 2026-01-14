@@ -1,8 +1,10 @@
 import React, { useEffect, useMemo, useRef, useState, useCallback } from "react";
-import { InteractionManager, Pressable, View } from "react-native";
+import { Pressable, View } from "react-native";
+import { addDays, differenceInCalendarDays } from "date-fns";
 
 import { calendarLayoutStyles as styles } from "./styles";
 import { useCalendarSelection } from "../../app/hooks/useCalendarSelection";
+import { useWeeksPager } from "./hooks/useWeeksPager";
 import TopBar from "./parts/TopBar";
 import HeaderRow from "./parts/HeaderRow";
 import WeekPager from "./parts/WeekPager";
@@ -10,7 +12,6 @@ import MonthModal from "./parts/MonthModal";
 
 import {
   DOW,
-  buildWeeksAround,
   getWeekStart,
   parseISODate,
   toISODate,
@@ -27,53 +28,22 @@ export default function Calendario({
 }) {
   const { selectedISO, setSelectedISO, getLastSource } = useCalendarSelection();
   const selectedDate = useMemo(() => parseISODate(selectedISO), [selectedISO]);
-
-  // ✅ weeks STATE (reconstruible on-demand)
-  const [weeks, setWeeks] = useState(() =>
-    buildWeeksAround(parseISODate(initialSelectedISO), BEFORE_WEEKS, AFTER_WEEKS)
-  );
-
-  const listRef = useRef(null);
-  const [currentIndex, setCurrentIndex] = useState(0);
-
-  // ✅ si reconstruimos weeks, aquí guardamos ISO a enfocar
-  const pendingFocusISORef = useRef(null);
-
-  const doScrollToWeekStartISO = useCallback(
-    (weekStartISO, animated = true) => {
-      const idx = weeks.findIndex((w) => w.weekStartISO === weekStartISO);
-      if (idx >= 0) {
-        listRef.current?.scrollToIndex({ index: idx, animated });
-        setCurrentIndex(idx);
-        return true;
-      }
-      return false;
-    },
-    [weeks]
-  );
-
-  const ensureAndScrollToDate = useCallback(
-    (dateObj, animated = true) => {
-      const weekStartISO = toISODate(getWeekStart(dateObj));
-
-      // si existe -> scroll ya
-      if (doScrollToWeekStartISO(weekStartISO, animated)) return;
-
-      // si no existe -> reconstruye semanas alrededor de dateObj
-      pendingFocusISORef.current = weekStartISO;
-      setWeeks(buildWeeksAround(dateObj, BEFORE_WEEKS, AFTER_WEEKS));
-    },
-    [doScrollToWeekStartISO]
-  );
-
-  // cuando weeks cambie, intenta enfocar
+  const selectedDateRef = useRef(selectedDate);
   useEffect(() => {
-    const pending = pendingFocusISORef.current;
-    if (!pending) return;
+    selectedDateRef.current = selectedDate;
+  }, [selectedDate]);
 
-    const ok = doScrollToWeekStartISO(pending, false);
-    if (ok) pendingFocusISORef.current = null;
-  }, [weeks, doScrollToWeekStartISO]);
+  const {
+    weeks,
+    listRef,
+    currentIndex,
+    setCurrentIndex,
+    ensureAndScrollToDate,
+  } = useWeeksPager({
+    initialCenterDate: parseISODate(initialSelectedISO),
+    beforeWeeks: BEFORE_WEEKS,
+    afterWeeks: AFTER_WEEKS,
+  });
 
   const handleSelect = useCallback(
     (dateObj) => {
@@ -86,7 +56,6 @@ export default function Calendario({
 
   // Si la selección viene de fuera (timeline, futuro: eventos), aseguramos scroll estable.
   const lastSelectedISORef = useRef(selectedISO);
-  const pendingSyncHandleRef = useRef(null);
   useEffect(() => {
     const prevISO = lastSelectedISORef.current;
     if (prevISO === selectedISO) return;
@@ -95,9 +64,11 @@ export default function Calendario({
     const source = getLastSource?.() || "unknown";
     const dateObj = parseISODate(selectedISO);
 
-    // Cancela una sincronización pendiente si existe.
-    pendingSyncHandleRef.current?.cancel?.();
-    pendingSyncHandleRef.current = null;
+    // Si el calendario mensual está abierto y el usuario empieza a cambiar día desde el timeline,
+    // colapsamos de inmediato a modo compacto.
+    if (monthModalOpen && (source === "timeline" || source === "timeline_preview")) {
+      setMonthModalOpen(false);
+    }
 
     if (source === "timeline" || source === "timeline_preview") {
       // Cuando vienes del timeline, prioriza que el gesto se sienta fluido.
@@ -111,7 +82,7 @@ export default function Calendario({
     }
 
     ensureAndScrollToDate(dateObj, true);
-  }, [selectedISO, ensureAndScrollToDate]);
+  }, [selectedISO, ensureAndScrollToDate, getLastSource, monthModalOpen]);
 
   // init: ubicar índice inicial según selectedDate
   useEffect(() => {
@@ -126,13 +97,20 @@ export default function Calendario({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // auto-selección del primer día de la semana (lunes) cuando cambias de semana por swipe
-  const selectWeekStartByIndex = useCallback(
+  // ✅ cuando el cambio viene por swipe, conservamos el mismo weekday que estaba seleccionado.
+  // Ej: semana 27..3 con domingo seleccionado (3) -> semana 20..26 selecciona domingo (26)
+  const selectSameWeekdayByIndex = useCallback(
     (idx) => {
       const w = weeks[idx];
       if (!w) return;
+
       const weekStart = parseISODate(w.weekStartISO);
-      handleSelect(weekStart);
+      const baseSelected = selectedDateRef.current;
+      const baseWeekStart = getWeekStart(baseSelected);
+      const offset = differenceInCalendarDays(baseSelected, baseWeekStart);
+      const clamped = Math.max(0, Math.min(6, offset));
+      const next = addDays(weekStart, clamped);
+      handleSelect(next);
     },
     [weeks, handleSelect]
   );
@@ -151,7 +129,10 @@ export default function Calendario({
   const pickFromMonth = (day) => {
     suppressAutoSelectRef.current = true;
     handleSelect(day);
-    ensureAndScrollToDate(day, false);
+    // Lógica: si el día es mayor, animar derecha; si es menor, izquierda; si es igual, no animar
+    const diff = differenceInCalendarDays(day, selectedDate);
+    const animate = diff !== 0;
+    ensureAndScrollToDate(day, animate);
   };
 
   // swipe mes infinito: mantiene día del mes (clamp) y sincroniza compacto
@@ -168,18 +149,6 @@ export default function Calendario({
         date={selectedDate}
         expanded={monthModalOpen}
         onToggleMonth={toggleMonthModal}
-        onPrevWeek={() => {
-          const prev = Math.max(0, currentIndex - 1);
-          listRef.current?.scrollToIndex({ index: prev, animated: true });
-          setCurrentIndex(prev);
-          requestAnimationFrame(() => selectWeekStartByIndex(prev));
-        }}
-        onNextWeek={() => {
-          const next = Math.min(weeks.length - 1, currentIndex + 1);
-          listRef.current?.scrollToIndex({ index: next, animated: true });
-          setCurrentIndex(next);
-          requestAnimationFrame(() => selectWeekStartByIndex(next));
-        }}
       />
 
       <View
@@ -210,27 +179,27 @@ export default function Calendario({
           }
 
           if (fromSwipe) {
-            selectWeekStartByIndex(idx);
+            selectSameWeekdayByIndex(idx);
           }
         }}
       />
 
-      {!monthModalOpen && (
-        <>
-          <Pressable
-            onPress={toggleMonthModal}
-            hitSlop={12}
-            accessibilityRole="button"
-            accessibilityLabel={monthModalOpen ? "Contraer calendario" : "Expandir calendario"}
-            accessibilityHint="Toca para alternar el calendario mensual"
-            style={({ pressed }) => [
-              styles.gripHandle,
-              pressed && styles.gripHandlePressed,
-            ]}
-          />
-          <View style={styles.bottomBorder} />
-        </>
-      )}
+      {/* Mantener layout estable: no removemos el grip/borde cuando se abre el modal.
+          Solo lo deshabilitamos y lo volvemos transparente. */}
+      <Pressable
+        onPress={toggleMonthModal}
+        disabled={monthModalOpen}
+        hitSlop={12}
+        accessibilityRole="button"
+        accessibilityLabel={monthModalOpen ? "Calendario desplegado" : "Expandir calendario"}
+        accessibilityHint="Toca para alternar el calendario mensual"
+        style={({ pressed }) => [
+          styles.gripHandle,
+          pressed && !monthModalOpen && styles.gripHandlePressed,
+          monthModalOpen && { opacity: 0 },
+        ]}
+      />
+      <View style={[styles.bottomBorder, monthModalOpen && { opacity: 0 }]} />
 
       <MonthModal
         visible={monthModalOpen}

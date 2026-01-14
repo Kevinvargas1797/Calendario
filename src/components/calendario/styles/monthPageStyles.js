@@ -30,6 +30,9 @@ export const monthPageStyles = StyleSheet.create({
   monthDayCircleSelected: {
     backgroundColor: colors.accentDark,
   },
+  monthDayCircleSelectedToday: {
+    backgroundColor: colors.accentPrimary,
+  },
   monthDayCircleToday: {
     borderWidth: 2,
     borderColor: colors.accentPrimary,
