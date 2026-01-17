@@ -18,7 +18,7 @@ const HourRow = memo(function HourRow({ hour, rowH, styles }) {
             key={`${hour}-${minute}`}
             style={[
               styles.minuteRow,
-              { height: minuteHeight, alignItems: isHourLine ? "flex-start" : "center" },
+              { height: minuteHeight, alignItems: "flex-start" },
             ]}
           >
             <View style={styles.labelCol}>

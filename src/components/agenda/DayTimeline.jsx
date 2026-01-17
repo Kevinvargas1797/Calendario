@@ -7,6 +7,7 @@ import { useCalendarSelection } from "../../app/hooks/useCalendarSelection";
 
 import DayTimelinePage from "./parts/DayTimelinePage";
 import { parseISODateLocal, toISODateLocal } from "./utils/date";
+import { clampMinutesInDay } from "./utils/timeMapping";
 
 const LABEL_COL_WIDTH = 60;
 // Keep the pill inside the hour-label column. We align the line start to the
@@ -15,6 +16,7 @@ const NOW_PILL_RIGHT_INSET = spacing.sm; // align with hour-label paddingRight
 const NOW_PILL_OVERFLOW_RIGHT = 3;
 const NOW_LINE_JOIN_OVERLAP = 2;
 const DEFAULT_ROW_H = 80;
+const TIMELINE_TOP_PADDING = spacing.md;
 
 const { width: SCREEN_W } = Dimensions.get("window");
 const PAGER_RANGE = 5; // permite saltar hasta 5 días en un swipe
@@ -23,6 +25,10 @@ const PAGER_CENTER_INDEX = PAGER_RANGE;
 export default function DayTimeline({ rowHeight = DEFAULT_ROW_H, initialDate }) {
   const { selectedISO, setSelectedISO, getLastSource } = useCalendarSelection();
   const hours = useMemo(() => Array.from({ length: 24 }, (_, i) => i), []);
+
+  // Persisted events per date (ISO yyyy-mm-dd). This is the base for future
+  // features (overlaps, resize, drag between days, persistence, etc.).
+  const [eventsByISO, setEventsByISO] = useState({});
 
   // Drives real-time updates of the "now" marker (line + pill label).
   // Without this, the marker would stay stuck at the time of the last render.
@@ -79,7 +85,7 @@ export default function DayTimeline({ rowHeight = DEFAULT_ROW_H, initialDate }) 
       if (!isTodaySelected) return;
       if (typeof nowY !== "number") return;
       const ref = pageScrollRefs.current?.d0;
-      const targetY = Math.max(0, nowY - rowHeight * 1.2);
+      const targetY = Math.max(0, nowY + TIMELINE_TOP_PADDING - rowHeight * 1.2);
       ref?.scrollTo?.({ y: targetY, animated });
     },
     [isTodaySelected, nowY, rowHeight]
@@ -308,17 +314,59 @@ export default function DayTimeline({ rowHeight = DEFAULT_ROW_H, initialDate }) 
   );
 
   const renderItem = useCallback(
-    ({ item }) => (
+    ({ item }) => {
+      const date = addDays(cursorDate, item.delta);
+      const dateISO = toISODateLocal(date);
+      const events = eventsByISO?.[dateISO] || [];
+
+      return (
       <View style={[styles.page, { width: SCREEN_W }]}>
         <DayTimelinePage
           ref={(r) => {
             if (r) pageScrollRefs.current[item.key] = r;
           }}
+          dateISO={dateISO}
           rowHeight={rowHeight}
+          labelColWidth={LABEL_COL_WIDTH}
           hours={hours}
           showNowLine={isTodaySelected && item.delta === 0}
           nowY={nowY}
           nowLabel={nowLabel}
+          events={events}
+          onCreateEvent={(draft) => {
+            // draft: { dateISO, startMinutes, durationMinutes }
+            const safeStart = clampMinutesInDay(draft.startMinutes);
+            const safeDuration = Math.max(5, Math.round(draft.durationMinutes || 30));
+            const id = `${draft.dateISO}-${Date.now()}`;
+
+            setEventsByISO((prev) => {
+              const next = { ...prev };
+              const arr = Array.isArray(next[draft.dateISO]) ? next[draft.dateISO].slice() : [];
+              arr.push({ id, startMinutes: safeStart, durationMinutes: safeDuration, title: "Evento" });
+              next[draft.dateISO] = arr;
+              return next;
+            });
+          }}
+          onUpdateEvent={({ dateISO: iso, id, startMinutes, durationMinutes }) => {
+            const safeStart = clampMinutesInDay(startMinutes);
+            const safeDuration =
+              typeof durationMinutes === "number"
+                ? Math.max(5, Math.round(durationMinutes))
+                : null;
+            setEventsByISO((prev) => {
+              const current = prev?.[iso];
+              if (!Array.isArray(current) || current.length === 0) return prev;
+              const idx = current.findIndex((e) => e.id === id);
+              if (idx < 0) return prev;
+              const nextArr = current.slice();
+              nextArr[idx] = {
+                ...nextArr[idx],
+                startMinutes: safeStart,
+                ...(safeDuration != null ? { durationMinutes: safeDuration } : {}),
+              };
+              return { ...prev, [iso]: nextArr };
+            });
+          }}
           onScroll={(e) => {
             const y = e?.nativeEvent?.contentOffset?.y;
             if (typeof y === "number") lastScrollYRef.current = y;
@@ -326,8 +374,9 @@ export default function DayTimeline({ rowHeight = DEFAULT_ROW_H, initialDate }) 
           styles={styles}
         />
       </View>
-    ),
-    [hours, rowHeight, isTodaySelected, nowY, nowLabel]
+      );
+    },
+    [hours, rowHeight, isTodaySelected, nowY, nowLabel, cursorDate, eventsByISO]
   );
 
   return (
@@ -335,7 +384,8 @@ export default function DayTimeline({ rowHeight = DEFAULT_ROW_H, initialDate }) 
       <FlatList
         ref={listRef}
         data={data}
-        extraData={cursorDate.getTime()}
+        // Re-render pages when cursor changes, current-time tick updates, or events change.
+        extraData={{ cursor: cursorDate.getTime(), nowTick, eventsByISO }}
         horizontal
         pagingEnabled
         decelerationRate="fast"
@@ -385,10 +435,12 @@ const styles = StyleSheet.create({
     backgroundColor: colors.backgroundPrimary,
   },
   content: {
+    paddingTop: TIMELINE_TOP_PADDING,
     paddingBottom: spacing.xl,
   },
   gridWrap: {
     position: "relative",
+    backgroundColor: colors.backgroundPrimary,
   },
   nowLineWrap: {
     position: "absolute",
@@ -396,6 +448,8 @@ const styles = StyleSheet.create({
     right: 0,
     height: 24,
     justifyContent: "center",
+    zIndex: 20000,
+    elevation: 20000,
   },
   nowLineRule: {
     position: "absolute",
@@ -422,6 +476,8 @@ const styles = StyleSheet.create({
     paddingLeft: spacing.xs,
     paddingRight: NOW_PILL_RIGHT_INSET,
     overflow: "visible",
+    zIndex: 20001,
+    elevation: 20001,
   },
   nowPill: {
     backgroundColor: colors.accentPrimary,
@@ -433,6 +489,8 @@ const styles = StyleSheet.create({
     justifyContent: "center",
     alignItems: "center",
     marginRight: -NOW_PILL_OVERFLOW_RIGHT,
+    zIndex: 20002,
+    elevation: 20002,
   },
   nowPillText: {
     color: colors.backgroundPrimary,
@@ -466,7 +524,7 @@ const styles = StyleSheet.create({
   // Place labels on the divider line (not inside the 15-min block), matching the
   // iOS-style day view where the hour label aligns with the hour line.
   hourLabelOnLine: {
-    marginTop: -8,
+    marginTop: -6,
   },
   hourNumberText: {
     fontSize: 15,
@@ -490,7 +548,7 @@ const styles = StyleSheet.create({
     opacity: 0.65,
   },
   minuteTextOnLine: {
-    marginTop: -7,
+    marginTop: -5,
   },
   minuteLine: {
     flex: 1,
@@ -504,20 +562,114 @@ const styles = StyleSheet.create({
   minuteLineSecondary: {
     opacity: 0.22,
   },
+
+  eventCard: {
+    position: "absolute",
+    left: LABEL_COL_WIDTH + 6,
+    right: 6,
+    borderRadius: 8,
+    backgroundColor: "#E6F3FB",
+    borderWidth: 0,
+    overflow: "visible",
+    paddingTop: 10,
+    paddingBottom: 10,
+    paddingRight: 12,
+    paddingLeft: 6,
+  },
+  eventCardSelected: {
+    backgroundColor: "#0B2C4D",
+    // Elegant bottom shadow (selected state)
+    shadowColor: "#000",
+    shadowOpacity: 0.18,
+    shadowRadius: 10,
+    shadowOffset: { width: 0, height: 10 },
+    elevation: 12,
+  },
+  eventCardDraft: {
+    backgroundColor: "#CFEAF6",
+    borderColor: "rgba(17, 24, 39, 0.10)",
+  },
+  eventCardAccentBar: {
+    position: "absolute",
+    left: 5,
+    top: 5,
+    bottom: 5,
+    width: 3,
+    borderRadius: 999,
+    backgroundColor: "#4FB7CF",
+    opacity: 1,
+  },
+  eventCardContent: {
+    paddingLeft: 4,
+    flexDirection: "column",
+    justifyContent: "flex-start",
+    rowGap: 2,
+  },
+  eventCardTitle: {
+    color: "#0B2C4D", // match selected card background
+    fontWeight: "700",
+    fontSize: 12.5,
+    lineHeight: 15,
+    includeFontPadding: false,
+  },
+  eventCardTitleSelected: {
+    color: colors.backgroundPrimary,
+    fontWeight: "800",
+  },
+  eventCardMetaRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    columnGap: 5,
+  },
+  eventCardMetaIcon: {
+    color: "#607180",
+    marginTop: 1,
+  },
+  eventCardMetaIconSelected: {
+    position: "absolute",
+    left: 2,
+    top: 8,
+    bottom: 8,
+    width: 2,
+    borderRadius: 999,
+    backgroundColor: "#4FB7CF",
+    opacity: 1,
+    fontVariant: ["tabular-nums"],
+  },
+
+  // Resize handles (visual dots)
+  resizeHandleDot: {
+    color: "#1A2B38",
+    fontWeight: "700",
+    fontSize: 16,
+    lineHeight: 20,
+    marginBottom: 2,
+    includeFontPadding: false,
+    backgroundColor: "rgba(255, 255, 255, 0.92)",
+    borderWidth: 1,
+    borderColor: "#0B2C4D",
+  },
+  eventCardMetaTextSelected: {
+    paddingLeft: 0,
+    color: "rgba(255, 255, 255, 0.85)",
+    fontWeight: "700",
+  },
   todayButtonLayer: {
     position: "absolute",
     bottom: spacing.lg,
-    right: spacing.lg,
+    color: "#7BA6B6",
+    marginTop: 1,
   },
   todayButton: {
     backgroundColor: colors.accentPrimary,
     borderRadius: 999,
     paddingHorizontal: spacing.xl,
     paddingVertical: spacing.sm + 2,
-    shadowColor: colors.accentDark,
-    shadowOpacity: 0.2,
-    shadowRadius: 8,
-    shadowOffset: { width: 0, height: 4 },
+    color: "#7BA6B6",
+    fontWeight: "500",
+    fontSize: 13,
+    lineHeight: 16,
+    marginLeft: 2,
     elevation: 5,
   },
   todayButtonPressed: {

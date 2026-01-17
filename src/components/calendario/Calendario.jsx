@@ -66,7 +66,10 @@ export default function Calendario({
 
     // Si el calendario mensual está abierto y el usuario empieza a cambiar día desde el timeline,
     // colapsamos de inmediato a modo compacto.
-    if (monthModalOpen && (source === "timeline" || source === "timeline_preview")) {
+    if (
+      monthModalOpen &&
+      (source === "timeline" || source === "timeline_preview" || source === "today_button")
+    ) {
       setMonthModalOpen(false);
     }
 
